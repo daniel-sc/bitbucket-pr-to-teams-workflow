@@ -1,17 +1,43 @@
-// Import necessary modules
-import { serve } from "https://deno.land/std@0.203.0/http/server.ts";
+function getRequiredEnv(name: string): string {
+  const value = Deno.env.get(name)?.trim();
 
-// Load environment variables
-const TARGET_USER = Deno.env.get("TARGET_USER");
-const TEAMS_WEBHOOK_URL = Deno.env.get("TEAMS_WEBHOOK_URL");
+  if (!value) {
+    console.error(`Environment variable ${name} must be set.`);
+    Deno.exit(1);
+  }
 
-if (!TARGET_USER || !TEAMS_WEBHOOK_URL) {
-  console.error("Environment variables TARGET_USER and TEAMS_WEBHOOK_URL must be set.");
+  return value;
+}
+
+const TARGET_USERS = new Set(
+  (Deno.env.get("TARGET_USERS") ?? Deno.env.get("TARGET_USER") ?? "")
+    .split(",")
+    .map((user) => user.trim().toLowerCase())
+    .filter(Boolean),
+);
+const TEAMS_WEBHOOK_URL = getRequiredEnv("TEAMS_WEBHOOK_URL");
+
+if (TARGET_USERS.size === 0) {
+  console.error(
+    "Environment variable TARGET_USERS (or TARGET_USER) must be set.",
+  );
   Deno.exit(1);
 }
 
+function normalizeUser(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized || null;
+}
+
 // Function to send a message to MS Teams
-async function postToTeams(description: string, viewUrl: string): Promise<void> {
+async function postToTeams(
+  description: string,
+  viewUrl: string,
+): Promise<void> {
   const adaptiveCard = {
     type: "message",
     attachments: [
@@ -23,22 +49,21 @@ async function postToTeams(description: string, viewUrl: string): Promise<void> 
             {
               type: "TextBlock",
               text: description,
-              wrap: true
-            }
+              wrap: true,
+            },
           ],
           actions: [
             {
               type: "Action.OpenUrl",
               title: "Open PR",
-              url: viewUrl
-            }
+              url: viewUrl,
+            },
           ],
           $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
-          version: "1.5"
-        }
-      }
-    ]
-    
+          version: "1.5",
+        },
+      },
+    ],
   };
 
   const response = await fetch(TEAMS_WEBHOOK_URL, {
@@ -54,8 +79,7 @@ async function postToTeams(description: string, viewUrl: string): Promise<void> 
   }
 }
 
-// Start the server
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
   }
@@ -73,18 +97,21 @@ serve(async (req) => {
     return new Response("Event not handled", { status: 200 });
   }
 
-  const prAuthor = payload.pullRequest?.author?.user?.emailAddress;
+  const prAuthor = normalizeUser(
+    payload.pullRequest?.author?.user?.emailAddress,
+  );
   const authorName = payload.pullRequest?.author?.user?.displayName;
 
-  if (prAuthor === TARGET_USER) {
+  if (prAuthor && TARGET_USERS.has(prAuthor)) {
     const prTitle = payload.pullRequest?.title || "(no title)";
     const prLink = payload.pullRequest?.links?.self[0]?.href || "(no link)";
 
-    const description = `A new pull request was created by ${authorName}:\n**${prTitle}**`;
+    const description =
+      `A new pull request was created by ${authorName}:\n**${prTitle}**`;
 
     await postToTeams(description, prLink);
   } else {
-    console.log(`skipping PR from different author: ${prAuthor}`)
+    console.log(`Skipping PR from non-target author: ${prAuthor ?? "unknown"}`);
   }
 
   return new Response("OK", { status: 200 });
